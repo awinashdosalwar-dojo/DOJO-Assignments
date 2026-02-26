@@ -1,80 +1,82 @@
 name: Build & Deploy .NET App to Azure Web App
 
-# ── Triggers ──────────────────────────────────────────────────────────────────
 on:
   push:
-    branches: [ main ]           # auto-deploy on every push to main
+    branches: [ main ]
   pull_request:
-    branches: [ main ]           # build + test on PRs (no deploy)
-  workflow_dispatch:             # allow manual trigger from GitHub UI
+    branches: [ main ]
+  workflow_dispatch:
 
-# ── Environment Variables ─────────────────────────────────────────────────────
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+  actions: read
+
 env:
   DOTNET_VERSION: '8.0.x'
-  PROJECT_PATH: './DotNetDemoApp/DotNetDemoApp.csproj'   # ← update this
-  PUBLISH_PATH: './publish'
+  PROJECT_PATH:  './src/DotNetDemoApp/DotNetDemoApp.csproj'
+  TEST_PATH:     './src/DotNetDemoApp.Tests/DotNetDemoApp.Tests.csproj'
+  PUBLISH_PATH:  './publish'
+  TEST_RESULTS:  './TestResults'
 
-# =============================================================================
 jobs:
-
-# ─────────────────────────────────────────────────────────────────────────────
-# JOB 1 — Build & Test
-# ─────────────────────────────────────────────────────────────────────────────
   build:
-    name: 🏗️ Build & Test
+    name: Build & Test
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      checks: write        # ← required by dorny/test-reporter to create Check Runs
-      pull-requests: write # ← required to post comments on PRs
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup .NET ${{ env.DOTNET_VERSION }}
+      - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: Show folder structure
-        run: |
-         pwd
-         ls -R
-
       - name: Restore
-        run: dotnet restore
-
-      - name: Restore NuGet packages
         run: dotnet restore ${{ env.PROJECT_PATH }}
 
-      - name: Build (Release)
+      - name: Build
         run: dotnet build ${{ env.PROJECT_PATH }} --configuration Release --no-restore
 
-      - name: Run unit tests
+      - name: Run tests
         run: |
-          dotnet test ${{ env.PROJECT_PATH }} \
-            --configuration Release \
-            --no-build \
-            --verbosity normal \
-            --logger "trx;LogFileName=test-results.trx" \
-            --results-directory ./TestResults
-        continue-on-error: true  # don't fail the job if tests fail   
+          if [ -f "${{ env.TEST_PATH }}" ]; then
+            echo "TEST_EXISTS=true" >> $GITHUB_ENV
+            mkdir -p ${{ env.TEST_RESULTS }}
+            dotnet test ${{ env.TEST_PATH }} \
+              --configuration Release \
+              --logger "trx;LogFileName=test-results.trx" \
+              --results-directory ${{ env.TEST_RESULTS }}
+          else
+            echo "TEST_EXISTS=false" >> $GITHUB_ENV
+            echo "No test project found — skipping."
+          fi
 
       - name: Publish test results
-        uses: dorny/test-reporter@v1
-        if: always()
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: env.TEST_EXISTS == 'true' && always()
         with:
-          name: .NET Test Results
-          path: './TestResults/*.trx'
-          reporter: dotnet-trx
+          files: '${{ env.TEST_RESULTS }}/**/*.trx'
+          check_name: '.NET Test Results'
+          comment_mode: always
+          fail_on: 'test failures'
 
-      - name: Publish app (Release)
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: env.TEST_EXISTS == 'true' && always()
+        with:
+          name: test-results-${{ github.sha }}
+          path: ${{ env.TEST_RESULTS }}
+          retention-days: 7
+
+      - name: Publish app
         run: |
           dotnet publish ${{ env.PROJECT_PATH }} \
             --configuration Release \
             --output ${{ env.PUBLISH_PATH }} \
-            --no-build
+            --no-restore
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -83,12 +85,8 @@ jobs:
           path: ${{ env.PUBLISH_PATH }}
           retention-days: 3
 
-# ─────────────────────────────────────────────────────────────────────────────
-# JOB 2 — Deploy to Azure Web App
-# Only runs on push to main (not on PRs)
-# ─────────────────────────────────────────────────────────────────────────────
   deploy:
-    name: 🚀 Deploy to Azure Web App
+    name: Deploy to Azure Web App
     runs-on: ubuntu-latest
     needs: build
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
@@ -113,30 +111,19 @@ jobs:
         id: deploy
         uses: azure/webapps-deploy@v3
         with:
-          app-name: ${{ secrets.AZURE_WEBAPP_NAME }}     # set in GitHub secrets
+          app-name: ${{ secrets.AZURE_WEBAPP_NAME }}
           package:  ${{ env.PUBLISH_PATH }}
 
-      - name: Health check after deploy
+      - name: Health check
         run: |
           URL="${{ steps.deploy.outputs.webapp-url }}"
-          echo "Checking: $URL"
           for i in {1..8}; do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$URL" || echo "000")
             echo "Attempt $i — HTTP $STATUS"
-            [[ "$STATUS" == "200" ]] && echo "✅ App is healthy!" && exit 0
+            [[ "$STATUS" == "200" ]] && echo "Healthy!" && exit 0
             sleep 10
           done
-          echo "❌ Health check failed" && exit 1
-
-      - name: Deployment summary
-        run: |
-          echo "### ✅ Deployment Complete" >> $GITHUB_STEP_SUMMARY
-          echo "| | |" >> $GITHUB_STEP_SUMMARY
-          echo "|--|--|" >> $GITHUB_STEP_SUMMARY
-          echo "| **App** | ${{ secrets.AZURE_WEBAPP_NAME }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **URL** | ${{ steps.deploy.outputs.webapp-url }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Commit** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Deployed by** | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "Health check failed" && exit 1
 
       - name: Azure Logout
         if: always()
