@@ -32,7 +32,7 @@
     "suffix":             "[toLower(uniqueString(resourceGroup().id, parameters('projectName')))]",
     "logWorkspaceName":   "[concat(parameters('projectName'), '-logs')]",
     "appInsightsName":    "[concat(parameters('projectName'), '-insights')]",
-    "storageAccountName": "[concat(toLower(parameters('projectName')), 'sa', variables('suffix'))]",
+    "storageAccountName": "[substring(concat(toLower(parameters('projectName')), 'sa', variables('suffix')),0,24)]",
     "webAppPlanName":     "[concat(parameters('projectName'), '-web-plan')]",
     "webAppName":         "[concat(parameters('projectName'), '-web-', variables('suffix'))]",
     "funcPlanName":       "[concat(parameters('projectName'), '-func-plan')]",
