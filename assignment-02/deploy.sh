@@ -1,94 +1,131 @@
 #!/bin/bash
 # =============================================================================
 # Azure CLI Deployment Script
-# Creates: Log Analytics + App Insights + Storage + Web App + Function App
+# Managed Identity + Key Vault + Function App
 #
-# Prerequisites: Azure CLI installed  →  az login
-# Usage: chmod +x deploy.sh && ./deploy.sh
+# Usage:
+#   chmod +x deploy.sh
+#   ./deploy.sh
 # =============================================================================
 
 set -euo pipefail
 
-# ── Edit these values ─────────────────────────────────────────────────────────
-PROJECT_NAME="dotnetdemo"
+# ── Configuration — edit these ────────────────────────────────────────────────
+PROJECT_NAME="kvdemo"
 RESOURCE_GROUP="rg-${PROJECT_NAME}"
 LOCATION="eastus"
 TEMPLATE="./azuredeploy.json"
+SECRET_NAME="MyAppSecret"
+SECRET_VALUE="Hello-from-KeyVault-via-ManagedIdentity!"
 # ─────────────────────────────────────────────────────────────────────────────
+
+GREEN='\033[0;32m'; CYAN='\033[0;36m'; YELLOW='\033[1;33m'; RESET='\033[0m'
+info()    { echo -e "${CYAN}[INFO]${RESET}  $*"; }
+success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
 
 echo ""
 echo "============================================================"
-echo "  Azure Deployment: Web App + Function App + Log Analytics"
+echo "  Azure: Managed Identity + Key Vault + Function App"
 echo "============================================================"
 
 # STEP 1 — Login
 echo ""
-echo "[1/5] Logging in to Azure..."
+info "STEP 1 | Login to Azure"
 az login --output none
-echo "      Logged in as: $(az account show --query user.name -o tsv)"
-echo "      Subscription: $(az account show --query name -o tsv)"
+success "Logged in as: $(az account show --query user.name -o tsv)"
+success "Subscription: $(az account show --query name -o tsv)"
 
-# STEP 2 — Create Resource Group
+# STEP 2 — Resource Group
 echo ""
-echo "[2/5] Creating resource group: ${RESOURCE_GROUP} in ${LOCATION}..."
+info "STEP 2 | Create resource group: ${RESOURCE_GROUP}"
 az group create \
   --name "$RESOURCE_GROUP" \
   --location "$LOCATION" \
   --output table
 
-# STEP 3 — Validate ARM Template
+# STEP 3 — Validate
 echo ""
-echo "[3/5] Validating ARM template..."
+info "STEP 3 | Validate ARM template (dry run)"
 az deployment group validate \
   --resource-group "$RESOURCE_GROUP" \
   --template-file "$TEMPLATE" \
-  --parameters projectName="$PROJECT_NAME" \
+  --parameters \
+      projectName="$PROJECT_NAME" \
+      keyVaultSecretName="$SECRET_NAME" \
+      keyVaultSecretValue="$SECRET_VALUE" \
   --output none
-echo "      Validation passed!"
+success "Template validation passed"
 
-# STEP 4 — Deploy ARM Template
+# STEP 4 — Deploy
 echo ""
-echo "[4/5] Deploying ARM template (takes ~2-3 mins)..."
-DEPLOY_OUTPUT=$(az deployment group create \
+info "STEP 4 | Deploy ARM template (~3 minutes)..."
+DEPLOY=$(az deployment group create \
   --resource-group "$RESOURCE_GROUP" \
   --template-file "$TEMPLATE" \
-  --parameters projectName="$PROJECT_NAME" \
-  --query "properties.outputs" \
+  --parameters \
+      projectName="$PROJECT_NAME" \
+      keyVaultSecretName="$SECRET_NAME" \
+      keyVaultSecretValue="$SECRET_VALUE" \
   --output json)
 
-# STEP 5 — Show results
-echo ""
-echo "[5/5] Deployment complete! Resources created:"
-echo ""
+# Parse outputs
+FUNC_NAME=$(echo "$DEPLOY"   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['properties']['outputs']['functionAppName']['value'])")
+FUNC_URL=$(echo "$DEPLOY"    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['properties']['outputs']['functionAppUrl']['value'])")
+KV_NAME=$(echo "$DEPLOY"     | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['properties']['outputs']['keyVaultName']['value'])")
+KV_URI=$(echo "$DEPLOY"      | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['properties']['outputs']['keyVaultUri']['value'])")
+PRINCIPAL=$(echo "$DEPLOY"   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['properties']['outputs']['managedIdentityPrincipalId']['value'])")
+LOG_WS=$(echo "$DEPLOY"      | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['properties']['outputs']['logAnalyticsWorkspaceName']['value'])")
 
-WEB_APP_NAME=$(echo "$DEPLOY_OUTPUT"   | grep -oP '"webAppName":\s*\{"[^"]*":\s*"\K[^"]+')
-WEB_APP_URL=$(echo "$DEPLOY_OUTPUT"    | grep -oP '"webAppUrl":\s*\{"[^"]*":\s*"\K[^"]+')
-FUNC_APP_NAME=$(echo "$DEPLOY_OUTPUT"  | grep -oP '"functionAppName":\s*\{"[^"]*":\s*"\K[^"]+')
-FUNC_APP_URL=$(echo "$DEPLOY_OUTPUT"   | grep -oP '"functionAppUrl":\s*\{"[^"]*":\s*"\K[^"]+')
-LOG_WS=$(echo "$DEPLOY_OUTPUT"         | grep -oP '"logAnalyticsWorkspaceName":\s*\{"[^"]*":\s*"\K[^"]+')
-
-echo "  Web App Name    : $WEB_APP_NAME"
-echo "  Web App URL     : $WEB_APP_URL"
-echo ""
-echo "  Function App    : $FUNC_APP_NAME"
-echo "  Function URL    : $FUNC_APP_URL"
-echo ""
-echo "  Log Analytics   : $LOG_WS"
-echo ""
-echo "  Resource Group  : $RESOURCE_GROUP"
 echo ""
 echo "============================================================"
-echo "  Save these values — you'll need them for CI/CD setup!"
+echo "  DEPLOYMENT COMPLETE"
 echo "============================================================"
 echo ""
+echo "  Function App  : $FUNC_NAME"
+echo "  Function URL  : $FUNC_URL"
+echo ""
+echo "  Key Vault     : $KV_NAME"
+echo "  Key Vault URI : $KV_URI"
+echo ""
+echo "  Identity ID   : $PRINCIPAL"
+echo "  Log Analytics : $LOG_WS"
+echo ""
+echo "============================================================"
 
-# Save outputs to a file for CI/CD reference
+# STEP 5 — Verify RBAC assignment
+echo ""
+info "STEP 5 | Verifying RBAC role assignment on Key Vault..."
+ROLE_CHECK=$(az role assignment list \
+  --assignee "$PRINCIPAL" \
+  --scope "$(az keyvault show --name "$KV_NAME" --resource-group "$RESOURCE_GROUP" --query id -o tsv)" \
+  --query "[0].roleDefinitionName" \
+  --output tsv)
+
+if [[ "$ROLE_CHECK" == "Key Vault Secrets User" ]]; then
+  success "RBAC confirmed: Function App identity has 'Key Vault Secrets User' on $KV_NAME"
+else
+  warn "RBAC role not yet visible (can take 1-2 mins to propagate). Verify in portal."
+fi
+
+# STEP 6 — Quick test hint
+echo ""
+info "STEP 6 | Test your function once deployed:"
+echo ""
+echo "  curl https://${FUNC_NAME}.azurewebsites.net/api/GetSecret"
+echo ""
+echo "  Expected response:"
+echo "  { \"secret\": \"Hello-from-KeyVault-via-ManagedIdentity!\" }"
+echo ""
+
+# Save outputs
 cat > ./deploy-outputs.env << EOF
-WEB_APP_NAME=${WEB_APP_NAME}
-WEB_APP_URL=${WEB_APP_URL}
-FUNC_APP_NAME=${FUNC_APP_NAME}
-FUNC_APP_URL=${FUNC_APP_URL}
+FUNC_APP_NAME=${FUNC_NAME}
+FUNC_APP_URL=${FUNC_URL}
+KEY_VAULT_NAME=${KV_NAME}
+KEY_VAULT_URI=${KV_URI}
+MANAGED_IDENTITY_PRINCIPAL=${PRINCIPAL}
 RESOURCE_GROUP=${RESOURCE_GROUP}
 LOG_WORKSPACE=${LOG_WS}
 EOF
-echo "  Outputs saved to: ./deploy-outputs.env"
+success "Outputs saved → ./deploy-outputs.env"
