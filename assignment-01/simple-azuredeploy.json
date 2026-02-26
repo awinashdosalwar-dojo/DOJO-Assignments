@@ -64,8 +64,8 @@
       "name": "[variables('webAppPlanName')]",
       "location": "[parameters('location')]",
       "sku": {
-        "name": "F1",
-        "tier": "Free"
+        "name": "B1",
+        "tier": "Basic"
       },
       "kind": "linux",
       "properties": {
@@ -108,8 +108,8 @@
       "name": "[variables('functionPlanName')]",
       "location": "[parameters('location')]",
       "sku": {
-        "name": "Y1",
-        "tier": "Dynamic"
+        "name": "B1",
+        "tier": "Basic"
       },
       "kind": "functionapp",
       "properties": {
