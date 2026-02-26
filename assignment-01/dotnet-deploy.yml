@@ -32,12 +32,15 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
-          
+
       - name: Show folder structure
         run: |
          pwd
          ls -R
 
+      - name: Restore
+        run: dotnet restore
+        
       - name: Restore NuGet packages
         run: dotnet restore ${{ env.PROJECT_PATH }}
 
