@@ -39,8 +39,8 @@ jobs:
          ls -R
 
       - name: Restore
-        run: dotnet restore
-        
+        run: dotnet restore ./DotNetDemoApp/DotNetDemoApp.csproj
+
       - name: Restore NuGet packages
         run: dotnet restore ${{ env.PROJECT_PATH }}
 
