@@ -1,0 +1,65 @@
+# =============================================================================
+# Workflow A: Validate Azure Login
+# Purpose:   Simplest possible test — just login and show account info.
+#            Run this FIRST to verify your secrets and federated credentials.
+# Trigger:   Manual (workflow_dispatch) or push to main
+# =============================================================================
+
+name: A — Validate Azure Login
+
+on:
+  workflow_dispatch:   # Run manually from GitHub Actions tab
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/01-validate-login.yml'
+
+# REQUIRED: Grants permission to request OIDC token from GitHub
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  validate-login:
+    name: Test Azure OIDC Login
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Step 1: Checkout code ──────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Step 2: Login to Azure via OIDC ───────────────────────────────────
+      # No client secret needed — OIDC token is exchanged automatically
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      # ── Step 3: Verify login worked ────────────────────────────────────────
+      - name: Show Azure account details
+        run: |
+          echo "=== Logged in Account ==="
+          az account show --output table
+
+          echo ""
+          echo "=== Current Subscription ==="
+          az account show --query "{subscription:name, id:id, tenant:tenantId}" -o json
+
+      # ── Step 4: List resource groups (proves Contributor access) ──────────
+      - name: List accessible resource groups
+        run: |
+          echo "=== Resource Groups ==="
+          az group list --output table
+
+      # ── Step 5: Logout (always run, even if previous steps fail) ──────────
+      - name: Logout from Azure
+        if: always()
+        run: az logout

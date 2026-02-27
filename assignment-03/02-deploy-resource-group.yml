@@ -1,0 +1,107 @@
+# =============================================================================
+# Workflow B: Deploy a Resource Group
+# Purpose:   Demonstrates using Azure login to create/manage real resources.
+#            Creates a Resource Group — a safe, low-risk Azure resource.
+# Trigger:   Manual (workflow_dispatch) with inputs
+# =============================================================================
+
+name: B — Deploy Resource Group
+
+on:
+  workflow_dispatch:
+    inputs:
+      resource_group_name:
+        description: 'Resource Group name to create'
+        required: true
+        default: 'rg-dojo-demo'
+      location:
+        description: 'Azure region'
+        required: true
+        default: 'eastus'
+        type: choice
+        options:
+          - eastus
+          - westus2
+          - westeurope
+          - southeastasia
+      action:
+        description: 'Create or delete the resource group'
+        required: true
+        default: 'create'
+        type: choice
+        options:
+          - create
+          - delete
+
+# REQUIRED for OIDC
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RESOURCE_GROUP: ${{ github.event.inputs.resource_group_name }}
+  LOCATION: ${{ github.event.inputs.location }}
+
+jobs:
+  deploy-resource-group:
+    name: Manage Resource Group
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Step 1: Checkout ───────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Step 2: Azure Login ────────────────────────────────────────────────
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # ── Step 3: Create Resource Group ─────────────────────────────────────
+      - name: Create Resource Group
+        if: github.event.inputs.action == 'create'
+        run: |
+          echo "Creating resource group: $RESOURCE_GROUP in $LOCATION"
+          az group create \
+            --name $RESOURCE_GROUP \
+            --location $LOCATION \
+            --tags \
+              environment=demo \
+              managed-by=github-actions \
+              repo=${{ github.repository }} \
+              created-by=${{ github.actor }} \
+            --output table
+
+          echo ""
+          echo "✅ Resource group created successfully!"
+          echo "   Name:     $RESOURCE_GROUP"
+          echo "   Location: $LOCATION"
+          echo "   Portal:   https://portal.azure.com/#resource/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/$RESOURCE_GROUP"
+
+      # ── Step 4: Verify the resource group ─────────────────────────────────
+      - name: Verify Resource Group
+        if: github.event.inputs.action == 'create'
+        run: |
+          echo "=== Resource Group Details ==="
+          az group show \
+            --name $RESOURCE_GROUP \
+            --output json
+
+      # ── Step 5: Delete Resource Group (if action=delete) ──────────────────
+      - name: Delete Resource Group
+        if: github.event.inputs.action == 'delete'
+        run: |
+          echo "⚠️  Deleting resource group: $RESOURCE_GROUP"
+          az group delete \
+            --name $RESOURCE_GROUP \
+            --yes \
+            --no-wait
+          echo "✅ Delete initiated. This may take a few minutes."
+
+      # ── Step 6: Logout ─────────────────────────────────────────────────────
+      - name: Logout from Azure
+        if: always()
+        run: az logout

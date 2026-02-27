@@ -1,0 +1,205 @@
+# =============================================================================
+# Workflow C: Full Deploy with Environment Protection
+# Purpose:   Production-grade workflow demonstrating:
+#            - Separate build/validate and deploy jobs
+#            - Environment protection gates
+#            - Deploy to Azure Storage Account (static site)
+#            - Post-deploy verification
+# Trigger:   Push to main or PR
+# =============================================================================
+
+name: C — Full Deploy (Production)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# REQUIRED for OIDC
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write   # allows commenting on PRs
+
+env:
+  RESOURCE_GROUP: rg-dojo-demo
+  STORAGE_ACCOUNT_PREFIX: stodojodemo   # must be globally unique; suffix added below
+  LOCATION: eastus
+
+jobs:
+  # ============================================================================
+  # JOB 1: Validate (runs on PR and push)
+  # ============================================================================
+  validate:
+    name: Validate & Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Login with repo-level secrets (no environment — for PRs from forks)
+      - name: Login to Azure (validation)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate Azure credentials
+        run: |
+          echo "=== Validating Azure connection ==="
+          az account show --query "{subscription:name, tenant:tenantId}" -o table
+
+      - name: Check resource group exists
+        run: |
+          RG_EXISTS=$(az group exists --name $RESOURCE_GROUP)
+          if [ "$RG_EXISTS" = "true" ]; then
+            echo "✅ Resource group '$RESOURCE_GROUP' exists."
+          else
+            echo "⚠️  Resource group '$RESOURCE_GROUP' does not exist yet — will be created on deploy."
+          fi
+
+      - name: Logout from Azure
+        if: always()
+        run: az logout
+
+      - name: Comment on PR (validation passed)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '✅ **Azure Validation Passed** — OIDC login successful. Ready for deployment.'
+            })
+
+  # ============================================================================
+  # JOB 2: Deploy (runs only on push to main, after validate passes)
+  # Uses 'production' environment — requires environment secrets + approval gates
+  # ============================================================================
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    # This links to the GitHub Environment named 'production'
+    # - Reads secrets from the 'production' environment
+    # - Generates subject claim: repo:ORG/REPO:environment:production
+    # - Can enforce required reviewers, wait timers, branch restrictions
+    environment:
+      name: production
+      url: https://portal.azure.com/#resource/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/rg-dojo-demo
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Uses ENVIRONMENT-LEVEL secrets (not repo-level)
+      # Subject claim will be: repo:ORG/REPO:environment:production
+      - name: Login to Azure (production)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Ensure Resource Group exists
+        run: |
+          az group create \
+            --name $RESOURCE_GROUP \
+            --location $LOCATION \
+            --tags environment=production managed-by=github-actions \
+            --output none
+          echo "✅ Resource group ready: $RESOURCE_GROUP"
+
+      - name: Create Storage Account
+        id: storage
+        run: |
+          # Generate a unique storage account name using run number
+          STORAGE_NAME="${STORAGE_ACCOUNT_PREFIX}${{ github.run_number }}"
+          echo "STORAGE_NAME=$STORAGE_NAME" >> $GITHUB_OUTPUT
+
+          echo "Creating storage account: $STORAGE_NAME"
+          az storage account create \
+            --name $STORAGE_NAME \
+            --resource-group $RESOURCE_GROUP \
+            --location $LOCATION \
+            --sku Standard_LRS \
+            --kind StorageV2 \
+            --tags \
+              environment=production \
+              deployed-by=${{ github.actor }} \
+              commit=${{ github.sha }} \
+            --output none
+
+          echo "✅ Storage account created: $STORAGE_NAME"
+
+      - name: Enable static website hosting
+        run: |
+          az storage blob service-properties update \
+            --account-name ${{ steps.storage.outputs.STORAGE_NAME }} \
+            --static-website \
+            --index-document index.html \
+            --output none
+          echo "✅ Static website hosting enabled."
+
+      - name: Get Storage Account endpoint
+        id: endpoint
+        run: |
+          ENDPOINT=$(az storage account show \
+            --name ${{ steps.storage.outputs.STORAGE_NAME }} \
+            --resource-group $RESOURCE_GROUP \
+            --query "primaryEndpoints.web" -o tsv)
+          echo "ENDPOINT=$ENDPOINT" >> $GITHUB_OUTPUT
+          echo "Storage endpoint: $ENDPOINT"
+
+      - name: Summarise deployment
+        run: |
+          echo ""
+          echo "============================================="
+          echo " ✅ Deployment Complete!"
+          echo "============================================="
+          echo " Resource Group:   $RESOURCE_GROUP"
+          echo " Storage Account:  ${{ steps.storage.outputs.STORAGE_NAME }}"
+          echo " Static Site URL:  ${{ steps.endpoint.outputs.ENDPOINT }}"
+          echo " Deployed by:      ${{ github.actor }}"
+          echo " Commit:           ${{ github.sha }}"
+          echo "============================================="
+
+      - name: Logout from Azure
+        if: always()
+        run: az logout
+
+  # ============================================================================
+  # JOB 3: Post-deploy verification (runs after deploy)
+  # ============================================================================
+  verify:
+    name: Post-Deploy Verification
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify deployed resources
+        run: |
+          echo "=== Resources in $RESOURCE_GROUP ==="
+          az resource list \
+            --resource-group $RESOURCE_GROUP \
+            --output table
+
+      - name: Logout from Azure
+        if: always()
+        run: az logout
